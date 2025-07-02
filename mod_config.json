@@ -1,0 +1,331 @@
+#include <windowsx.h>
+#include <windows.h>
+#include <dwmapi.h>
+#include <gdiplus.h>
+#include <shellapi.h>
+#include <urlmon.h>
+#include <shlwapi.h>
+#include <string>
+#include <vector>
+#include <fstream>
+#include <sstream>
+#include <cmath>
+
+#pragma comment(lib, "gdiplus.lib")
+#pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "urlmon.lib")
+#pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "shell32.lib")
+
+using namespace Gdiplus;
+
+static ULONG_PTR gdipToken;
+static BOOL dragging = FALSE;
+static POINT dragStart = {};
+static float progress = 0.0f;
+static std::wstring statusText = L"Ожидание запуска...";
+
+// Конфигурация загрузчика
+const std::wstring GITHUB_BASE = L"https://raw.githubusercontent.com/youruser/yourrepo/main/";
+const std::wstring DOWNLOAD_PATH = L"C:\\Rynware\\";
+const std::vector<std::wstring> FILES = { L"main.exe", L"config.json", L"data.bin" };
+const wchar_t* TELEGRAM_URL = L"https://t.me/yourhandle";
+
+// Глобальные переменные
+HWND hWndMain;
+RECT rcClient;
+
+struct BtnState {
+    bool hover = false;
+    bool down = false;
+};
+
+BtnState btnLaunch;
+BtnState btnTelegram;
+
+// Функция для создания директории, если она не существует
+void CreateDirectoryIfNotExists(const std::wstring& path) {
+    if (!PathFileExists(path.c_str())) {
+        CreateDirectory(path.c_str(), NULL);
+    }
+}
+
+// Функция для скачивания файлов
+void DownloadFiles() {
+    CreateDirectoryIfNotExists(DOWNLOAD_PATH);
+    
+    for (size_t i = 0; i < FILES.size(); i++) {
+        std::wstring url = GITHUB_BASE + FILES[i];
+        std::wstring localPath = DOWNLOAD_PATH + FILES[i];
+        
+        statusText = L"Загрузка " + FILES[i] + L"...";
+        InvalidateRect(hWndMain, NULL, TRUE);
+        UpdateWindow(hWndMain);
+        
+        HRESULT hr = URLDownloadToFileW(NULL, url.c_str(), localPath.c_str(), 0, NULL);
+        if (FAILED(hr)) {
+            statusText = L"Ошибка загрузки " + FILES[i];
+            InvalidateRect(hWndMain, NULL, TRUE);
+            return;
+        }
+        
+        progress = static_cast<float>(i + 1) / FILES.size();
+        InvalidateRect(hWndMain, NULL, TRUE);
+        UpdateWindow(hWndMain);
+    }
+    
+    statusText = L"Загрузка завершена!";
+    progress = 1.0f;
+    InvalidateRect(hWndMain, NULL, TRUE);
+}
+
+// Настройка блюра для фона
+void SetupBlur(HWND hWnd) {
+    DWM_BLURBEHIND bb = { sizeof(bb) };
+    bb.dwFlags = DWM_BB_ENABLE;
+    bb.fEnable = TRUE;
+    DwmEnableBlurBehindWindow(hWnd, &bb);
+}
+
+// Рисование закругленных прямоугольников
+void DrawRoundedRect(Graphics& g, Brush* brush, RectF rect, REAL radius) {
+    GraphicsPath path;
+    path.AddArc(rect.X, rect.Y, radius, radius, 180, 90);
+    path.AddArc(rect.X + rect.Width - radius, rect.Y, radius, radius, 270, 90);
+    path.AddArc(rect.X + rect.Width - radius, rect.Y + rect.Height - radius, radius, radius, 0, 90);
+    path.AddArc(rect.X, rect.Y + rect.Height - radius, radius, radius, 90, 90);
+    path.CloseFigure();
+    g.FillPath(brush, &path);
+}
+
+// Рисование кнопки
+void DrawButton(Graphics& g, RECT rc, BtnState& st, const std::wstring& txt) {
+    Color bg = st.down ? Color(200, 80, 140, 210)
+        : st.hover ? Color(150, 100, 160, 230)
+        : Color(100, 70, 130, 190);
+    SolidBrush b(bg);
+    DrawRoundedRect(g, &b, RectF((REAL)rc.left, (REAL)rc.top, (REAL)(rc.right - rc.left), (REAL)(rc.bottom - rc.top)), 8);
+    
+    Font font(L"Segoe UI", 12, FontStyleBold);
+    SolidBrush tb(Color::White);
+    
+    RectF textRect((REAL)rc.left, (REAL)rc.top, (REAL)(rc.right - rc.left), (REAL)(rc.bottom - rc.top));
+    StringFormat sf;
+    sf.SetAlignment(StringAlignmentCenter);
+    sf.SetLineAlignment(StringAlignmentCenter);
+    
+    g.DrawString(txt.c_str(), -1, &font, textRect, &sf, &tb);
+}
+
+// Центрирование окна
+void CenterWindow(HWND hwnd) {
+    RECT rc;
+    GetWindowRect(hwnd, &rc);
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
+    SetWindowPos(hwnd, NULL,
+        (GetSystemMetrics(SM_CXSCREEN) - w) / 2,
+        (GetSystemMetrics(SM_CYSCREEN) - h) / 2,
+        0, 0, SWP_NOSIZE | SWP_NOZORDER);
+}
+
+LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_CREATE: {
+        SetupBlur(hwnd);
+        CenterWindow(hwnd);
+        break;
+    }
+
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        GetClientRect(hwnd, &rcClient);
+        Graphics g(hdc);
+
+        // Фон
+        SolidBrush bgBrush(Color(255, 35, 35, 45));
+        g.FillRectangle(&bgBrush, 0, 0, rcClient.right, rcClient.bottom);
+
+        // Заголовок
+        Font titleFont(L"Segoe UI", 28, FontStyleBold);
+        SolidBrush titleBrush(Color(255, 100, 180, 255));
+        RectF titleRect(0, 30, (REAL)rcClient.right, 50);
+        StringFormat sf;
+        sf.SetAlignment(StringAlignmentCenter);
+        g.DrawString(L"Rynware", -1, &titleFont, titleRect, &sf, &titleBrush);
+
+        // Версия
+        Font versionFont(L"Segoe UI", 10);
+        SolidBrush versionBrush(Color(180, 200, 200, 255));
+        RectF versionRect(0, 80, (REAL)rcClient.right, 20);
+        g.DrawString(L"Версия клиента: 1.0.0", -1, &versionFont, versionRect, &sf, &versionBrush);
+
+        // Статус загрузки
+        Font statusFont(L"Segoe UI", 12);
+        SolidBrush statusBrush(Color(200, 255, 255, 255));
+        RectF statusRect(20, 150, (REAL)(rcClient.right - 40), 30);
+        g.DrawString(statusText.c_str(), -1, &statusFont, statusRect, NULL, &statusBrush);
+
+        // Прогресс бар
+        RectF progressBgRect(20, 190, (REAL)(rcClient.right - 40), 20);
+        SolidBrush progressBgBrush(Color(100, 70, 70, 90));
+        DrawRoundedRect(g, &progressBgBrush, progressBgRect, 10);
+
+        RectF progressRect(20, 190, (REAL)((rcClient.right - 40) * progress), 20);
+        LinearGradientBrush progressBrush(Point(0, 0), Point(rcClient.right, 0), 
+            Color(255, 100, 180, 255), Color(255, 80, 160, 220));
+        DrawRoundedRect(g, &progressBrush, progressRect, 10);
+
+        // Кнопка запуска
+        RECT btnRect = { rcClient.right/2 - 100, rcClient.bottom - 100, rcClient.right/2 + 100, rcClient.bottom - 60 };
+        DrawButton(g, btnRect, btnLaunch, L"Загрузить и запустить");
+
+        // Кнопка Telegram
+        RECT tgRect = { rcClient.right/2 - 100, rcClient.bottom - 50, rcClient.right/2 + 100, rcClient.bottom - 10 };
+        DrawButton(g, tgRect, btnTelegram, L"Telegram канал");
+
+        EndPaint(hwnd, &ps);
+        break;
+    }
+
+    case WM_MOUSEMOVE: {
+        int x = GET_X_LPARAM(lParam);
+        int y = GET_Y_LPARAM(lParam);
+        
+        // Проверка hover для кнопок
+        RECT btnRect = { rcClient.right/2 - 100, rcClient.bottom - 100, rcClient.right/2 + 100, rcClient.bottom - 60 };
+        bool inBtn = x >= btnRect.left && x <= btnRect.right && y >= btnRect.top && y <= btnRect.bottom;
+        
+        if (inBtn != btnLaunch.hover) {
+            btnLaunch.hover = inBtn;
+            InvalidateRect(hwnd, &btnRect, TRUE);
+        }
+        
+        RECT tgRect = { rcClient.right/2 - 100, rcClient.bottom - 50, rcClient.right/2 + 100, rcClient.bottom - 10 };
+        bool inTg = x >= tgRect.left && x <= tgRect.right && y >= tgRect.top && y <= tgRect.bottom;
+        
+        if (inTg != btnTelegram.hover) {
+            btnTelegram.hover = inTg;
+            InvalidateRect(hwnd, &tgRect, TRUE);
+        }
+        
+        if (dragging) {
+            POINT p; GetCursorPos(&p);
+            int dx = p.x - dragStart.x;
+            int dy = p.y - dragStart.y;
+            SetWindowPos(hwnd, NULL,
+                rcClient.left + dx,
+                rcClient.top + dy,
+                0, 0, SWP_NOSIZE | SWP_NOZORDER);
+        }
+        break;
+    }
+
+    case WM_LBUTTONDOWN: {
+        int x = GET_X_LPARAM(lParam);
+        int y = GET_Y_LPARAM(lParam);
+        
+        // Проверка клика по кнопкам
+        RECT btnRect = { rcClient.right/2 - 100, rcClient.bottom - 100, rcClient.right/2 + 100, rcClient.bottom - 60 };
+        if (x >= btnRect.left && x <= btnRect.right && y >= btnRect.top && y <= btnRect.bottom) {
+            btnLaunch.down = true;
+            InvalidateRect(hwnd, &btnRect, TRUE);
+        }
+        
+        RECT tgRect = { rcClient.right/2 - 100, rcClient.bottom - 50, rcClient.right/2 + 100, rcClient.bottom - 10 };
+        if (x >= tgRect.left && x <= tgRect.right && y >= tgRect.top && y <= tgRect.bottom) {
+            btnTelegram.down = true;
+            InvalidateRect(hwnd, &tgRect, TRUE);
+        }
+        else {
+            // Начало перетаскивания окна
+            dragging = TRUE;
+            SetCapture(hwnd);
+            GetCursorPos(&dragStart);
+            GetWindowRect(hwnd, &rcClient);
+        }
+        break;
+    }
+
+    case WM_LBUTTONUP: {
+        int x = GET_X_LPARAM(lParam);
+        int y = GET_Y_LPARAM(lParam);
+        
+        if (btnLaunch.down) {
+            btnLaunch.down = false;
+            RECT btnRect = { rcClient.right/2 - 100, rcClient.bottom - 100, rcClient.right/2 + 100, rcClient.bottom - 60 };
+            InvalidateRect(hwnd, &btnRect, TRUE);
+            
+            if (x >= btnRect.left && x <= btnRect.right && y >= btnRect.top && y <= btnRect.bottom) {
+                // Запуск процесса загрузки
+                std::thread downloadThread(DownloadFiles);
+                downloadThread.detach();
+            }
+        }
+        
+        if (btnTelegram.down) {
+            btnTelegram.down = false;
+            RECT tgRect = { rcClient.right/2 - 100, rcClient.bottom - 50, rcClient.right/2 + 100, rcClient.bottom - 10 };
+            InvalidateRect(hwnd, &tgRect, TRUE);
+            
+            if (x >= tgRect.left && x <= tgRect.right && y >= tgRect.top && y <= tgRect.bottom) {
+                ShellExecuteW(NULL, L"open", TELEGRAM_URL, NULL, NULL, SW_SHOWNORMAL);
+            }
+        }
+        
+        dragging = FALSE;
+        ReleaseCapture();
+        break;
+    }
+
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        break;
+
+    default:
+        return DefWindowProc(hwnd, msg, wParam, lParam);
+    }
+
+    return 0;
+}
+
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    // Инициализация GDI+
+    GdiplusStartupInput gdiplusStartupInput;
+    GdiplusStartup(&gdipToken, &gdiplusStartupInput, NULL);
+
+    // Регистрация класса окна
+    WNDCLASSEX wc = { sizeof(WNDCLASSEX) };
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = hInstance;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)CreateSolidBrush(RGB(35, 35, 45));
+    wc.lpszClassName = L"RynwareLauncher";
+    RegisterClassEx(&wc);
+
+    // Создание окна
+    hWndMain = CreateWindowEx(
+        WS_EX_LAYERED | WS_EX_TOPMOST,
+        L"RynwareLauncher",
+        L"Rynware Launcher",
+        WS_POPUP | WS_VISIBLE,
+        0, 0, 500, 400,
+        NULL, NULL, hInstance, NULL);
+
+    // Прозрачность
+    SetLayeredWindowAttributes(hWndMain, 0, 255, LWA_ALPHA);
+
+    // Основной цикл сообщений
+    MSG msg;
+    while (GetMessage(&msg, NULL, 0, 0)) {
+        TranslateMessage(&msg);
+        DispatchMessage(&msg);
+    }
+
+    // Завершение работы GDI+
+    GdiplusShutdown(gdipToken);
+
+    return (int)msg.wParam;
+}
